@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mapa Interativo com Múltiplos Projetos</title>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <style>
+    body {
+      display: flex;
+      flex-direction: row;
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+    #map-container {
+      flex: 2;
+      padding: 20px;
+    }
+    #sidebar {
+      flex: 0.5;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      padding: 20px;
+      background: #f8f9fa;
+      border-left: 2px solid #ccc;
+      overflow-y: auto;
+    }
+    .projeto-box {
+      background: white;
+      padding: 10px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+    }
+    .projeto-box h3 {
+      margin-top: 0;
+    }
+    .projeto-box ul {
+      list-style-type: none;
+      padding-left: 0;
+      font-size: 12px;
+    }
+    #map {
+      width: 100%;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <div id="map-container">
+    <input type="text" id="searchBox" placeholder="Digite um endereço..." />
+    <button onclick="buscarEndereco()">🔍 Buscar</button>
+
+    <div id="statusSistema" style="
+  padding: 8px;
+  background: #f0f0f0;
+  border-bottom: 1px solid #ccc;
+  font-weight: bold;
+  font-family: sans-serif;
+">
+  🟢 Sistema pronto
+</div>
+
+
+    <div id="map"></div>
+  </div>
+
+  <div id="sidebar">
+    <h2>Projetos de Cercas</h2>
+    <input type="file" id="jsonUpload" accept=".json" multiple onchange="importarMultiplosJSON(event)">
+    <button onclick="criarNovoProjeto()">🆕 Novo Projeto de Cercas</button>
+
+    <button onclick="ativarMedicao()">📏 Medir Distância</button>
+    <button onclick="limparMedicao()">🧹 Limpar Medição</button>
+
+
+    <div id="projetosContainer"></div>
+  </div>
+
+  <script>
+    var map = L.map('map', {maxZoom: 19}).setView([-23.5505, -46.6333], 10);
+    var streets = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+    var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
+      attribution: 'Esri'
+    });
+    L.control.layers({ "Mapa": streets, "Satélite": satellite }).addTo(map);
+
+    var projetos = {};
+    var projetoAtual = null;
+    var cercaAtual = null;
+
+    function importarMultiplosJSON(event) {
+      const files = event.target.files;
+      for (let file of files) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          try {
+            const jsonData = JSON.parse(e.target.result);
+            const id = file.name.replace('.json', '') + '_' + Date.now();
+            criarProjeto(id, jsonData);
+          } catch (err) {
+            alert("Erro ao importar " + file.name);
+          }
+        };
+        reader.readAsText(file);
+      }
+    }
+
+    function criarProjeto(id, data) {
+      projetos[id] = {
+        nome: data.fence_name || id,
+        descricao: data.description || "",
+        cercas: {
+          internal: { pontos: [], markers: [], polygonLayer: null, color: 'red' },
+          external: { pontos: [], markers: [], polygonLayer: null, color: 'yellow' },
+          box: { pontos: [], markers: [], polygonLayer: null, color: 'blue' }
+        }
+      };
+
+      const container = document.createElement('div');
+      container.className = 'projeto-box';
+      container.id = 'projeto_' + id;
+      container.innerHTML = `
+        <div id="info_${id}">
+        <h3 id="nome_${id}">${projetos[id].nome}</h3>
+        <p id="desc_${id}">${projetos[id].descricao}</p>
+        <button onclick="editarProjeto('${id}')">✏️ Editar</button>
+        </div>
+        <div id="edit_${id}" style="display: none;">
+        <input type="text" id="input_nome_${id}" value="${projetos[id].nome}" />
+        <textarea id="input_desc_${id}" rows="2">${projetos[id].descricao}</textarea>
+        <button onclick="salvarEdicaoProjeto('${id}')">💾 Salvar</button>
+        <button onclick="cancelarEdicaoProjeto('${id}')">❌ Cancelar</button>
+        </div>
+
+        <div style="display: flex; gap: 5px; margin-bottom: 5px;">
+            <button onclick="novaCerca('${id}', 'internal')">Adicionar Int. 🔴</button>
+            <button onclick="apagarCerca('${id}', 'internal')">🗑️ Apagar Int. 🔴</button>
+        </div>
+
+        <div style="display: flex; gap: 5px; margin-bottom: 5px;">
+            <button onclick="novaCerca('${id}', 'external')">Adicionar Ext. 🟡</button>
+            <button onclick="apagarCerca('${id}', 'external')">🗑️ Apagar Ext. 🟡</button>
+        </div>
+
+        <div style="display: flex; gap: 5px; margin-bottom: 5px;">
+            <button onclick="novaCerca('${id}', 'box')">Adicionar Box 🔵</button>
+            <button onclick="apagarCerca('${id}', 'box')">🗑️ Apagar Box 🔵</button>
+        </div>
+
+        <div style="display: flex; gap: 5px; margin-bottom: 5px;">
+            <button onclick="exportarProjeto('${id}')">📤 Exportar JSON</button>
+            <button onclick="removerProjeto('${id}')">🗑️ Remover Projeto</button>
+        </div>
+
+        <div style="margin-top: 10px;">
+          <label>Importar KML para:</label>
+            <select id="kmlTipo_${id}">
+              <option value="internal">🔴 Interna</option>
+              <option value="external">🟡 Externa</option>
+            </select>
+          <input type="file" accept=".kml" onchange="handleKMLUpload(event, '${id}')">
+        </div>
+
+              
+        <ul id="lista_${id}_internal"></ul>
+        <ul id="lista_${id}_external"></ul>
+        <ul id="lista_${id}_box"></ul>
+      `;
+      document.getElementById('projetosContainer').appendChild(container);
+
+      carregarCercas(id, data);
+    }
+
+    // function novaCerca(projetoId, tipo) {
+    //     projetoAtual = projetoId;
+    //     cercaAtual = tipo;
+
+    //     const projeto = projetos[projetoId];
+
+    //     for (let nome in projeto.cercas) {
+    //         const cerca = projeto.cercas[nome];
+    //         const visivel = nome === tipo;
+
+    //         // Verifica se há marcadores e aplica visibilidade
+    //         if (Array.isArray(cerca.markers)) {
+    //         cerca.markers.forEach(marker => {
+    //             if (marker && typeof marker.setOpacity === 'function') {
+    //             marker.setOpacity(visivel ? 1 : 0);
+    //             }
+    //         });
+    //         }
+    //     }
+
+    //     document.getElementById("statusEdicao").textContent =
+    //         `✏️ Editando: ${tipo} (${projeto.nome})`;
+    // }
+
+    function novaCerca(projetoId, tipo) {
+        projetoAtual = projetoId;
+        cercaAtual = tipo;
+
+        for (let pid in projetos) {
+            const projeto = projetos[pid];
+
+            for (let nome in projeto.cercas) {
+                const cerca = projeto.cercas[nome];
+                const visivel = pid === projetoId && nome === tipo;
+
+                // Oculta ou exibe marcadores
+                if (Array.isArray(cerca.markers)) {
+                    cerca.markers.forEach(marker => {
+                        if (marker && typeof marker.setOpacity === 'function') {
+                            marker.setOpacity(visivel ? 1 : 0);
+                        }
+                    });
+                }
+
+                // Opcional: também controlar interatividade
+                if (Array.isArray(cerca.markers)) {
+                    cerca.markers.forEach(marker => {
+                        if (marker && typeof marker.setInteractive === 'function') {
+                            marker.setInteractive(visivel);
+                        }
+                    });
+                }
+
+                // Opcional: controlar visibilidade do polígono
+                if (cerca.polygonLayer) {
+                    cerca.polygonLayer.setStyle({
+                        opacity: visivel ? 1 : 0.5,
+                        fillOpacity: visivel ? 0.3 : 0.1
+                    });
+                }
+            }
+        }
+
+        document.getElementById("statusEdicao").textContent =
+            `✏️ Editando: ${tipo} (${projetos[projetoId].nome})`;
+    }
+
+
+    map.on('click', function(e) {
+      if (!projetoAtual || !cercaAtual) return;
+      const projeto = projetos[projetoAtual];
+      const cerca = projeto.cercas[cercaAtual];
+      if (cercaAtual === 'box' && cerca.pontos.length >= 4) {
+        alert("A boundingBox só pode ter 4 vértices.");
+        return;
+      }
+
+      const latlng = e.latlng;
+      const marker = L.marker(latlng, { draggable: true }).addTo(map);
+      cerca.markers.push(marker);
+      cerca.pontos.push(latlng);
+
+      marker.on('dragend', function(event) {
+        const pos = event.target.getLatLng();
+        const idx = cerca.markers.indexOf(marker);
+        cerca.pontos[idx] = pos;
+        atualizarPoligonos(projetoAtual);
+        atualizarListas(projetoAtual);
+      });
+
+      marker.on('click', function() {
+        removerPonto(projetoAtual, marker);
+      });
+
+      atualizarPoligonos(projetoAtual);
+      atualizarListas(projetoAtual);
+    });
+
+    function removerPonto(projetoId, marker) {
+      const projeto = projetos[projetoId];
+      Object.values(projeto.cercas).forEach(cerca => {
+        const idx = cerca.markers.indexOf(marker);
+        if (idx > -1) {
+          cerca.markers.splice(idx, 1);
+          cerca.pontos.splice(idx, 1);
+          map.removeLayer(marker);
+        }
+      });
+      atualizarPoligonos(projetoId);
+      atualizarListas(projetoId);
+    }
+
+    function atualizarPoligonos(projetoId) {
+      const projeto = projetos[projetoId];
+      Object.values(projeto.cercas).forEach(cerca => {
+        if (cerca.polygonLayer) map.removeLayer(cerca.polygonLayer);
+        if (cerca.pontos.length > 2) {
+          cerca.polygonLayer = L.polygon(cerca.pontos.map(p => [p.lat, p.lng]), { color: cerca.color }).addTo(map);
+        }
+      });
+    }
+
+    function atualizarListas(projetoId) {
+      const projeto = projetos[projetoId];
+      for (let tipo in projeto.cercas) {
+        const listaId = `lista_${projetoId}_${tipo}`;
+        const pontos = projeto.cercas[tipo].pontos;
+        document.getElementById(listaId).innerHTML = pontos.map((p, i) =>
+          `<li>Ponto ${i + 1}: (${p.lat.toFixed(6)}, ${p.lng.toFixed(6)})</li>`).join('');
+      }
+    }
+
+    function carregarCercas(projetoId, data) {
+      const projeto = projetos[projetoId];
+      const bounds = [];
+
+      ['internal', 'external', 'box'].forEach(tipo => {
+        const lista = data[tipo] || [];
+        lista.forEach(ponto => {
+          const lat = ponto.latitude / 1000000;
+          const lng = ponto.longitude / 1000000;
+          bounds.push([lat, lng]);
+          const latlng = L.latLng(lat, lng);
+          const marker = L.marker(latlng, { draggable: true }).addTo(map);
+          projeto.cercas[tipo].markers.push(marker);
+          projeto.cercas[tipo].pontos.push(latlng);
+
+          marker.on('dragend', function(event) {
+            const pos = event.target.getLatLng();
+            const idx = projeto.cercas[tipo].markers.indexOf(marker);
+            projeto.cercas[tipo].pontos[idx] = pos;
+            atualizarPoligonos(projetoId);
+            atualizarListas(projetoId);
+          });
+
+          marker.on('click', function() {
+            removerPonto(projetoId, marker);
+          });
+        });
+      });
+
+      atualizarPoligonos(projetoId);
+      atualizarListas(projetoId);
+      if (bounds.length > 0) map.fitBounds(bounds);
+    }
+
+    function criarNovoProjeto() {
+        const nome = prompt("Digite o nome do novo projeto:");
+        if (!nome || nome.trim() === "") return;
+
+        const id = nome.trim().replace(/\s+/g, "_") + "_" + Date.now();
+        projetos[id] = {
+            nome: nome.trim(),
+            descricao: "Projeto criado manualmente",
+            cercas: {
+            internal: { pontos: [], markers: [], polygonLayer: null, color: 'red' },
+            external: { pontos: [], markers: [], polygonLayer: null, color: 'yellow' },
+            box: { pontos: [], markers: [], polygonLayer: null, color: 'blue' }
+            }
+        };
+
+        criarProjeto(id, projetos[id]);
+    }
+
+
+    function apagarCerca(projetoId, tipo) {
+    const projeto = projetos[projetoId];
+    const cerca = projeto.cercas[tipo];
+
+    // Remover marcadores do mapa
+    cerca.markers.forEach(marker => map.removeLayer(marker));
+    cerca.markers = [];
+
+    // Remover polígono do mapa
+    if (cerca.polygonLayer) {
+        map.removeLayer(cerca.polygonLayer);
+        cerca.polygonLayer = null;
+    }
+
+    // Limpar pontos
+    cerca.pontos = [];
+
+    // Atualizar interface
+    atualizarListas(projetoId);
+    }
+
+    function exportarProjeto(projetoId) {
+        const projeto = projetos[projetoId];
+        const dados = {};
+        
+        dados.fence_name = projeto.nome;
+        dados.description = projeto.descricao;
+
+        for (let tipo in projeto.cercas) {
+            const pontos = projeto.cercas[tipo].pontos;
+            dados[tipo] = pontos.map(p => ({
+            latitude: Math.round(p.lat * 1000000),
+            longitude: Math.round(p.lng * 1000000)
+            }));
+        }
+
+        const json = JSON.stringify(dados, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = projeto.nome.replace(/\s+/g, "_") + ".json";
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+
+    function removerProjeto(projetoId) {
+        const projeto = projetos[projetoId];
+        if (!projeto) return;
+
+        // Remover todos os marcadores e polígonos do mapa
+        for (let tipo in projeto.cercas) {
+            const cerca = projeto.cercas[tipo];
+            cerca.markers.forEach(marker => map.removeLayer(marker));
+            cerca.markers = [];
+
+            if (cerca.polygonLayer) {
+            map.removeLayer(cerca.polygonLayer);
+            cerca.polygonLayer = null;
+            }
+
+            cerca.pontos = [];
+        }
+
+        // Remover o elemento da interface
+        const container = document.getElementById('projeto_' + projetoId);
+        if (container) container.remove();
+
+        // Remover da memória
+        delete projetos[projetoId];
+
+        // Resetar seleção se necessário
+        if (projetoAtual === projetoId) {
+            projetoAtual = null;
+            cercaAtual = null;
+        }
+    }
+
+    function editarProjeto(id) {
+        document.getElementById(`info_${id}`).style.display = 'none';
+        document.getElementById(`edit_${id}`).style.display = 'block';
+    }
+
+    function cancelarEdicaoProjeto(id) {
+        document.getElementById(`edit_${id}`).style.display = 'none';
+        document.getElementById(`info_${id}`).style.display = 'block';
+    }
+
+    function salvarEdicaoProjeto(id) {
+        const novoNome = document.getElementById(`input_nome_${id}`).value.trim();
+        const novaDesc = document.getElementById(`input_desc_${id}`).value.trim();
+
+        if (novoNome === "") {
+            alert("O nome do projeto não pode estar vazio.");
+            return;
+        }
+
+        projetos[id].nome = novoNome;
+        projetos[id].descricao = novaDesc;
+
+        document.getElementById(`nome_${id}`).textContent = novoNome;
+        document.getElementById(`desc_${id}`).textContent = novaDesc;
+
+        cancelarEdicaoProjeto(id);
+    }
+
+    function buscarEndereco() {
+        const query = document.getElementById("searchBox").value.trim();
+        if (!query) return;
+
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}`;
+
+        fetch(url)
+            .then(response => response.json())
+            .then(data => {
+            if (data.length === 0) {
+                alert("Endereço não encontrado.");
+                return;
+            }
+
+            const lat = parseFloat(data[0].lat);
+            const lon = parseFloat(data[0].lon);
+            const latlng = L.latLng(lat, lon);
+
+            // Centraliza o mapa e adiciona marcador
+            map.setView(latlng, 16);
+            })
+            .catch(error => {
+            console.error("Erro ao buscar endereço:", error);
+            alert("Erro ao buscar endereço.");
+            });
+    }    
+    
+
+
+    function handleKMLUpload(event, projetoId) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const tipo = document.getElementById(`kmlTipo_${projetoId}`).value;
+      importarKMLParaCerca(projetoId, tipo, file);
+    }
+
+    function importarKMLParaCerca(projetoId, tipo, file) {
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = e.target.result;
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(text, "text/xml");
+
+        const coords = [];
+        const coordTags = xml.getElementsByTagName("coordinates");
+
+        for (let i = 0; i < coordTags.length; i++) {
+          const raw = coordTags[i].textContent.trim();
+          const lines = raw.split(/\s+/);
+
+          lines.forEach(line => {
+            const parts = line.split(",");
+            if (parts.length >= 2) {
+              const lng = parseFloat(parts[0]);
+              const lat = parseFloat(parts[1]);
+              if (!isNaN(lat) && !isNaN(lng)) {
+                coords.push(L.latLng(lat, lng));
+              }
+            }
+          });
+        }
+
+        if (coords.length === 0) {
+          alert("Nenhum polígono válido encontrado no KML.");
+          return;
+        }
+
+        const projeto = projetos[projetoId];
+        const cerca = projeto.cercas[tipo];
+
+        // 🔴 Apagar dados antigos
+        cerca.markers.forEach(marker => map.removeLayer(marker));
+        cerca.markers = [];
+        cerca.pontos = [];
+        if (cerca.polygonLayer) {
+          map.removeLayer(cerca.polygonLayer);
+          cerca.polygonLayer = null;
+        }
+
+        // ➕ Adicionar novos pontos
+        coords.forEach(latlng => {
+          const marker = L.marker(latlng, { draggable: true }).addTo(map);
+          cerca.markers.push(marker);
+          cerca.pontos.push(latlng);
+
+          marker.on('dragend', function(event) {
+            const pos = event.target.getLatLng();
+            const idx = cerca.markers.indexOf(marker);
+            cerca.pontos[idx] = pos;
+            atualizarPoligonos(projetoId);
+            atualizarListas(projetoId);
+          });
+
+          marker.on('click', function() {
+            removerPonto(projetoId, marker);
+          });
+        });
+
+        atualizarPoligonos(projetoId);
+        atualizarListas(projetoId);
+
+        if (cerca.pontos.length > 0) {
+          const bounds = L.latLngBounds(cerca.pontos);
+          map.fitBounds(bounds, { padding: [20, 20] });
+        }
+
+        alert(`✅ Cerca "${tipo}" atualizada com ${coords.length} pontos do KML.`);
+      };
+
+      reader.readAsText(file);
+    }
+
+
+    let medicaoAtiva = false;
+    let pontosMedicao = [];
+    let linhaMedicao = null;
+
+    function ativarMedicao() {
+      medicaoAtiva = true;
+      alert("Modo de medição ativado. Clique no mapa para adicionar pontos.");
+    }
+
+    map.on('click', function(e) {
+      if (!medicaoAtiva) return;
+
+      const latlng = e.latlng;
+      pontosMedicao.push(latlng);
+
+      L.marker(latlng).addTo(map);
+
+      if (pontosMedicao.length > 1) {
+        if (linhaMedicao) map.removeLayer(linhaMedicao);
+        linhaMedicao = L.polyline(pontosMedicao, { color: 'purple' }).addTo(map);
+
+        const distancia = calcularDistancia(pontosMedicao);
+        linhaMedicao.bindPopup(`Distância total: ${distancia.toFixed(2)} m`).openPopup();
+      }
+    });
+
+    function calcularDistancia(pontos) {
+      let total = 0;
+      for (let i = 1; i < pontos.length; i++) {
+        total += pontos[i - 1].distanceTo(pontos[i]);
+      }
+      return total;
+    }
+
+  function limparMedicao() {
+    medicaoAtiva = false;
+
+    // Remover linha de medição
+    if (linhaMedicao) {
+      map.removeLayer(linhaMedicao);
+      linhaMedicao = null;
+    }
+
+    // Remover marcadores da medição
+    if (Array.isArray(pontosMedicao)) {
+      pontosMedicao.forEach(latlng => {
+        // Encontrar e remover marcador correspondente
+        map.eachLayer(layer => {
+          if (layer instanceof L.Marker && layer.getLatLng().equals(latlng)) {
+            map.removeLayer(layer);
+          }
+        });
+      });
+    }
+
+    pontosMedicao = [];
+    alert("Medição limpa.");
+  }
+
+  setInterval(atualizarStatusAutomatico, 500); // Atualiza a cada meio segundo
+
+
+  function atualizarStatusAutomatico() {
+    let texto = "🟢 Sistema pronto";
+
+    if (medicaoAtiva) {
+      texto = "📏 Medindo distância";
+    } else if (projetoAtual && cercaAtual) {
+      const nomeProjeto = projetos[projetoAtual]?.nome || "Projeto desconhecido";
+      texto = `✏️ Editando cerca "${cercaAtual}" do projeto "${nomeProjeto}"`;
+    }
+
+    document.getElementById("statusSistema").textContent = texto;
+  }
+
+
+
+     </script>
+</body>
+</html>
