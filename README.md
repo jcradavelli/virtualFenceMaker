@@ -24,9 +24,8 @@ Este projeto é uma aplicação web interativa para criação, edição e visual
 
 Você pode visualizar e testar o projeto diretamente pelo GitHub Pages:
 
-👉 [https://seu-usuario.github.io/nome-do-repositorio](https://seu-usuario.github.io/nome-do-repositorio)
+👉 [https://jcradavelli.github.io/virtualFenceMaker] (https://jcradavelli.github.io/virtualFenceMaker)
 
-> Substitua `seu-usuario` e `nome-do-repositorio` pelo seu nome de usuário e nome do repositório no GitHub.
 
 ## 📁 Como usar
 
